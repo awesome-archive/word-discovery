@@ -2,6 +2,8 @@
 
 import struct
 import os
+import six
+import codecs
 import math
 import logging
 logging.basicConfig(level=logging.INFO, format=u'%(asctime)s - %(levelname)s - %(message)s')
@@ -54,7 +56,7 @@ class KenlmNgrams:
         chars = f.read()
         f.close()
         chars = chars.split('\x00')
-        self.chars = [i.decode('utf-8') for i in chars]
+        self.chars = [i.decode('utf-8') if six.PY2 else i for i in chars]
     def read_ngrams(self):
         """读取思路参考https://github.com/kpu/kenlm/issues/201
         """
@@ -81,19 +83,22 @@ class KenlmNgrams:
 def write_corpus(texts, filename):
     """将语料写到文件中，词与词(字与字)之间用空格隔开
     """
-    with open(filename, 'w') as f:
+    with codecs.open(filename, 'w', encoding='utf-8') as f:
         for s in Progress(texts, 10000, desc=u'exporting corpus'):
             s = ' '.join(s) + '\n'
-            f.write(s.encode('utf-8'))
+            f.write(s)
 
 
-def count_ngrams(corpus_file, order, vocab_file, ngram_file):
+def count_ngrams(corpus_file, order, vocab_file, ngram_file, memory=0.5):
     """通过os.system调用Kenlm的count_ngrams来统计频数
+    其中，memory是占用内存比例，理论上不能超过可用内存比例。
     """
-    return os.system(
-        './count_ngrams -o %s --write_vocab_list %s <%s >%s'
-        % (order, vocab_file, corpus_file, ngram_file)
+    done = os.system(
+        './count_ngrams -o %s --memory=%d%% --write_vocab_list %s <%s >%s'
+        % (order, memory * 100, vocab_file, corpus_file, ngram_file)
     )
+    if done != 0:
+        raise ValueError('Failed to count ngrams by KenLM.')
 
 
 def filter_ngrams(ngrams, total, min_pmi=1):
@@ -171,59 +176,31 @@ def filter_vocab(candidates, ngrams, order):
 
 # ======= 算法构建完毕，下面开始执行完整的构建词库流程 =======
 
-
-def strQ2B(ustring): # 全角转半角
-    rstring = ''
-    for uchar in ustring:
-        inside_code=ord(uchar)
-        if inside_code == 12288: # 全角空格直接转换
-            inside_code = 32
-        elif (inside_code >= 65281 and inside_code <= 65374): # 全角字符（除空格）根据关系转化
-            inside_code -= 65248
-        rstring += unichr(inside_code)
-    return rstring
-
-
-import pymongo
 import re
-
-db = pymongo.MongoClient().baike.items
+import glob
 
 # 语料生成器，并且初步预处理语料
 # 这个生成器例子的具体含义不重要，只需要知道它就是逐句地把文本yield出来就行了
 def text_generator():
-    for d in db.find().limit(5000000):
-        yield re.sub(u'[^\u4e00-\u9fa50-9a-zA-Z ]+', '\n', d['text'])
+    txts = glob.glob('/root/thuctc/THUCNews/*/*.txt')
+    for txt in txts:
+        d = codecs.open(txt, encoding='utf-8').read()
+        d = d.replace(u'\u3000', ' ').strip()
+        yield re.sub(u'[^\u4e00-\u9fa50-9a-zA-Z ]+', '\n', d)
 
 
 min_count = 32
 order = 4
-corpus_file = 'wx.corpus' # 语料保存的文件名
-vocab_file = 'wx.chars' # 字符集
-ngram_file = 'wx.ngrams' # ngram集
-output_file = 'wx.vocab' # 最后导出的词表
-
-
-"""
-# 读取《天龙八部》小说的生成器
-def text_generator():
-    with open('tianlongbabu.txt') as f:
-        for l in f:
-            yield re.sub(u'[^\u4e00-\u9fa50-9a-zA-Z ]+', '\n', l.decode('gbk'))
-
-
-min_count = 8
-order = 4
-corpus_file = 'tl.corpus' # 语料保存的文件名
-vocab_file = 'tl.chars' # 字符集
-ngram_file = 'tl.ngrams' # ngram集
-output_file = 'tl.vocab' # 最后导出的词表
-"""
+corpus_file = 'thucnews.corpus' # 语料保存的文件名
+vocab_file = 'thucnews.chars' # 字符集保存的文件名
+ngram_file = 'thucnews.ngrams' # ngram集保存的文件名
+output_file = 'thucnews.vocab' # 最后导出的词表文件名
+memory = 0.5 # memory是占用内存比例，理论上不能超过可用内存比例
 
 write_corpus(text_generator(), corpus_file) # 将语料转存为文本
-count_ngrams(corpus_file, order, vocab_file, ngram_file) # 用Kenlm统计ngram
+count_ngrams(corpus_file, order, vocab_file, ngram_file, memory) # 用Kenlm统计ngram
 ngrams = KenlmNgrams(vocab_file, ngram_file, order, min_count) # 加载ngram
-ngrams = filter_ngrams(ngrams.ngrams, ngrams.total, [0, 1, 3, 5]) # 过滤ngram
+ngrams = filter_ngrams(ngrams.ngrams, ngrams.total, [0, 2, 4, 6]) # 过滤ngram
 ngtrie = SimpleTrie() # 构建ngram的Trie树
 
 for w in Progress(ngrams, 100000, desc=u'build ngram trie'):
@@ -240,7 +217,7 @@ candidates = {i: j for i, j in candidates.items() if j >= min_count}
 candidates = filter_vocab(candidates, ngrams, order)
 
 # 输出结果文件
-with open(output_file, 'w') as f:
+with codecs.open(output_file, 'w', encoding='utf-8') as f:
     for i, j in sorted(candidates.items(), key=lambda s: -s[1]):
-        s = '%s\t%s\n' % (i.encode('utf-8'), j)
+        s = '%s %s\n' % (i, j)
         f.write(s)
